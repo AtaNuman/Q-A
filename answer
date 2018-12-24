@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+
+################################################################################
+# IMPORTS
+################################################################################
+
+from collections import Counter
+
+def warn(*args, **kwargs):
+    pass
+
+import warnings
+
+warnings.warn = warn
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+    warnings.simplefilter("ignore", category=RuntimeWarning)
+
+    import sys
+    import nltk
+    import spacy
+
+    name_ent = spacy.load("en_core_web_sm")
+
+    # stop words are commonly used words that don't add meaning/ value
+    from spacy.lang.en.stop_words import STOP_WORDS
+    STOP_WORDS.add("\n")
+    STOP_WORDS.add("?")
+    STOP_WORDS.add("s")
+
+
+################################################################################
+# HELPERS: types of questions
+################################################################################
+
+# map each type of question to types of POS
+W_DICT = {
+    "who":   ["PER", "ORG"],
+    "what":  ["NORP", "FAC", "ORG", "PRODUCT", "EVENT", "WORD_OF_ART"],
+    "where": ["FAC", "LOC", "GPE"],
+    "when":  ["EVENT", "DATE", "TIME"],
+    "why":   [],
+    "how":   []
+    }
+
+# use the w-words in a question to classify it
+def get_question_type(q):
+    q = q.lower()
+    question_types = W_DICT.keys()
+    for question_type in question_types:
+        if question_type in q:
+            return q
+    return None
+
+# not sure where / why this is used
+# def filter_types(q, sent):
+#     q_type = get_question_type(q)
+#     sent = sent[0]
+#     if (q_type in W_DICT):
+#         doc = nameEnt(sent)
+#         for ent in doc.ents:
+#             if(ent.label_ in W_DICT[typeQ]):
+#                 return True
+#         return False
+#     return True
+
+
+################################################################################
+# HELPERS: parsing the article
+################################################################################
+
+# given a string, get the "base words" of the non-stopwords
+# eg, the "base word" of "apples" is apple
+def lemmatize(s):
+    doc = name_ent(s)
+    base_words = []
+    for word in doc:
+        if (word not in STOP_WORDS):
+            base_words.append(word.lemma_)
+    return base_words
+
+# text --> a list of tuples, (sentence, tokenized sentence, lemmatized sentence)
+# "I have apples." --> [("I have apples.",
+#                       ["i", "have", "apples", "."],
+#                       ["apple"])
+#                      ]
+def parse_article(text):
+    sentences = nltk.sent_tokenize(text)
+    sentence_tuples = []
+    ind = 0
+    while(ind < len(sentences)):
+        sentence = sentences[ind]
+        sentence = sentence.strip('\n')
+        sentence = sentence.split('\n')
+        sentence = [s for s in sentence if s]
+        sentences = sentences[:ind] + sentence + sentences[ind+1:]
+        ind += 1
+    for sentence in sentences:
+        if("*" in sentence):
+            continue
+        elif("Image:" in sentence):
+            continue
+        tokens = nltk.word_tokenize(sentence)
+        if (tokens != []):
+            lemmatized = lemmatize(sentence)
+            t = (sentence, tokens, lemmatized)
+            sentence_tuples.append(t)
+    return sentence_tuples
+
+# text --> unigram probabilities
+def get_unigram(text):
+    tokens = nltk.word_tokenize(text)
+    counts = Counter(tokens)
+    size = len(counts)
+    for key in counts.keys():
+        counts[key] = (counts[key] / size)
+    return counts
+
+
+################################################################################
+# QUESTION ANSWERING FUNCTIONS
+################################################################################
+
+# find sentences in the article that could answer the question
+# q: question string
+# sentences: article, parsed into (sentence, tokenized, lemmatized) tuples
+def get_possible_answers(q, sentences):
+
+    # parse question
+    lemma_q = lemmatize(q)
+    q = nltk.word_tokenize(q)
+
+    # initialize
+    matches = []
+    count = 0
+    # loop through the sentences,
+    # and find those that have overlapping words with the question
+    for (sentence, tokens, lemma_s) in sentences:
+        overlap = [word for word in lemma_s if (word in lemma_q)]
+        if (len(overlap) >= (len(lemma_q) // 2)):
+            count += 1
+            matches.append(tokens)
+
+    return matches
+
+# from the possible answers, pick the best one
+def get_best_answer(answers, q, gram, default):
+
+    # parse question
+    q = nltk.word_tokenize(q)
+
+    # initialize a random default
+    best_answer = [default]
+    best_score = -1
+
+    # out of all the sentences in the article,
+    # which matches the question the best? 
+    # (the answers are already tokenized)
+    for answer in answers:
+        # score the sentence
+        current_score = 0
+        overlap = [word for word in q if (word in answer)]
+        for word in overlap:
+            if (word != " "):
+                current_score += (1 / gram[word])
+        # update the best answer
+        if (current_score > best_score):
+            best_score = current_score
+            best_answer = answer
+            # print(overlap)
+            # print(current_score)
+            # print(answer)
+    # print(list(map(lambda s: s.encode("ascii", "ignore"), best_answer)))
+    return " ".join(best_answer).strip()
+
+def yesNoQ(question):
+    clause = nltk.word_tokenize(question)[0]
+    if(clause.lower() in W_DICT):
+        return False
+    return True
+
+################################################################################
+# MAIN
+################################################################################
+
+if __name__ == "__main__":
+
+    # test_find_answers()
+
+    # command line arguments
+    wiki = sys.argv[1]
+    questions = sys.argv[2]
+    defaultAnswer = ""
+    
+    # wiki = "project_data/set3_a4.txt"
+    # questions = "project_data/sampleQs.txt"
+
+    # parse the article: create a list of (sentence, tokenized, lemmatized) lines
+    #                    create unigram probabilities of each word
+    with open(wiki, encoding="utf8") as f:
+        wiki_text = f.read()
+        wiki_content = wiki_text[:wiki_text.find("\nSee also")]
+        wiki_content = wiki_text[:wiki_text.find("\nRelated Wikipedia Articles")]
+        sentences = parse_article(wiki_content)
+        defaultAnswer = sentences[0][0]
+        unigrams = get_unigram(wiki_content)
+
+    # parse and answer the questions
+    with open(questions, encoding="utf8") as f:
+        for question in f.readlines():
+            if(question.strip() == ""):
+                print(defaultAnswer.encode("ascii", "ignore").decode("ascii", "replace"))
+            if(yesNoQ(question)):
+                print("Yes")
+            else:
+                question = nltk.word_tokenize(question)
+                question = " ".join(question[1:-1])
+                answers = get_possible_answers(question, sentences)
+                best_answer = get_best_answer(answers, question, unigrams, defaultAnswer)
+                print(best_answer.encode("ascii", "ignore").decode("ascii", "replace"))
+################################################################################
+# TESTS
+################################################################################
+
+# def find_answers(q, chosenSents):
+#     qSplit = nltk.word_tokenize(q)
+#     noun = " ".join(qSplit[2:-1])
+#     answers = []
+#     for sent in chosenSents:
+#         aStart = sent.find(noun)
+#         a = sent[aStart:]
+#         answers.append(a)
+#     return answers
+
+#     # Where is London? London is in England.
+#     # Who is Einstein? Einstein was a brilliant scientist.
+#     # Why is the sky blue? The sky is blue because of light...
+#     # What are magnets? Magnets are magical.
+#     # How are clouds formed? Clouds are formed by water vapor.
+# def test_find_answers():
+#     q0 = "Who is Albert Einstein?"
+#     sents0 = ["Albert Einstein is a scientist", "Albert Einstein was a scientist"]
+#     #print(find_answers(q0, sents0))
+#     q = "Where is London?"
+#     sents = ["The city of London is in England", "London is a metropolis", "London was the site of battles"]
+#     #print(find_answers(q, sents))
+
+
+

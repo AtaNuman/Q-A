@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+
+################################################################################
+# IMPORTS
+################################################################################
+
+def warn(*args, **kwargs):
+    pass
+
+import warnings
+warnings.warn = warn
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", category=PendingDeprecationWarning)
+    warnings.simplefilter("ignore", category=RuntimeWarning)
+    import sys
+    import nltk
+    from question_generator import *
+    from create_where import *
+    from create_who import *
+    from create_yn import *
+    from create_why import *
+    from create_what import *
+
+import random
+
+INVALID_IDX = -999
+
+################################################################################
+# HELPERS: cull the questions
+################################################################################
+
+pronouns = {" his "," her "," these"," she "," he "," it "," this "," those ",
+"himself","herself","itself","these"," it","it "}
+
+# do we have a better way of picking n questions?
+def n_best_questions(questions, n):
+    # get rid of questions with three or fewer words
+    qs = [q for q in questions if (len(q.split()) > 3)]
+
+
+    # shuffle to get a mix of why/yn/who/where
+    random.shuffle(qs)
+    # pick n questions
+    # if we don't have enough questions, print copies
+    all_qs = []
+    count = n
+    while(len(all_qs) < n):
+        q = qs[count%len(qs)]
+        add = True
+        for pro in pronouns:
+            if(pro in q):
+                add = False
+        if(add):
+            all_qs += [q]
+        count += 1
+    while (len(all_qs) < n):
+        all_qs += qs
+    return all_qs[:n]
+
+
+################################################################################
+# HELPERS: determine question type
+################################################################################
+
+def get_why_clause(doc):
+    pos = can_make_why_question(doc)
+    if (INVALID_IDX == pos):
+        return None
+    else:
+        flag = False
+        for token in doc[:pos]:
+            if ('VERB' == token.pos_):
+                flag = True
+        if (True == flag):
+            return doc[:pos]
+        else:
+            return None
+
+def can_make_why_question(doc):
+    l = len(doc)
+    root  = [token for token in doc if token.head == token][0]
+    if (len(list(root.lefts)) > 0):
+        subject = list(root.lefts)[0]
+        if 'PRON' == subject.pos_:
+            return INVALID_IDX
+    for index,token in enumerate(doc):
+        if "because" == token.text:
+            return index
+        if "due" == token.text and index < l-1 and "to" == doc[index+1].text:
+            return index - 1
+    return INVALID_IDX
+
+# map key POS to types of questions
+TAG_DICT = {
+
+    "PER": "who",
+    "ORG": "who",
+
+    "FAC": "where",
+    "LOC": "where",
+    "GPE": "where",
+
+    "PRODUCT": "what",
+    "EVENT": "what"
+    }
+
+#Look for why questions
+# use the POS tags in a sentence to classify it
+preps = {' at ',' in ', ' from ', ' through ', ' on ', ' to ', ' towards ',}
+
+def get_question_type(s):
+    question_types = []
+    possible_why_clause = get_why_clause(s)
+    if (possible_why_clause):
+        #print ("possible why clause: "+ " ".join([token.text for token in possible_why_clause]))
+        if (len(possible_why_clause) < 15):
+            question_types.append("why")
+    tagged_s = s.ents # tag the sentence, idk how
+    # subject = list(filter(lambda token: 'nsubj' in token.dep_, s))
+    # if subject and subject[0].ent_type_ in TAG_DICT:
+    #     return TAG_DICT[subject[0].ent_type_]
+    #tagged_s = s.ents # tag the sentence, idk how
+    sentence = str(s)
+    #print(sentence)
+    tagged_s = s.ents
+    #print(tagged_s)
+    for tag in tagged_s:
+        #print(tag)
+        ind = sentence.find(str(tag))
+        if(tag.label_ in TAG_DICT):
+            if(TAG_DICT[tag.label_] == "where"):
+                substring = sentence[ind-10:ind]
+                for prep in preps:
+                    if(substring.find(prep) != -1):
+                        question_types.append(TAG_DICT[tag.label_])
+            else:
+                question_types.append(TAG_DICT[tag.label_])
+        sentence = sentence[ind+len(str(tag)):]
+    if (question_types == []):
+            question_types.append("yes/no")
+    return(question_types)
+
+
+################################################################################
+# MAIN
+################################################################################
+
+if __name__ == "__main__":
+
+    # command line args
+    wiki = sys.argv[1] # path
+    N = int(sys.argv[2])
+
+    # read article
+    with open(wiki, encoding="utf8") as f:
+        wiki_text = f.read()
+        wiki_content = wiki_text[:wiki_text.find("\nSee also")]
+        wiki_content = wiki_text[:wiki_text.find("\nRelated Wikipedia Articles")]
+        sentences = nltk.sent_tokenize(wiki_content)
+
+    # create many questions
+    nlp = spacy.load("en_core_web_sm")
+    questions = []
+    for sentence in sentences:
+        if "\n" not in sentence and " p. " not in sentence and len(sentence.split()) > 5:
+            # figure out what type of question to make
+            question_type = get_question_type(nlp(sentence))
+            # print(question_type)
+            # create that question
+            if ("where" in question_type):
+                question = create_where_question(nlp(sentence))
+                if question != None:
+                    questions.append(question)
+            if ("who" in question_type):
+                question = create_who_question(nlp(sentence))
+                if question != None:
+                    questions.append(question)
+            if ("why" in question_type):
+                question = create_why_question(nlp(sentence))
+                if question != None:
+                    questions.append(question)
+            if ("what" in question_type):
+                question = create_what_question(nlp(sentence))
+                if question != None:
+                    questions.append(question)
+            else: # did
+                question = create_yn_question(nlp(sentence))
+            if question != None:
+                questions.append(question)
+
+    # cull them down to N questions
+    best_qs = n_best_questions(questions, N)
+
+    # print out
+    for q in best_qs:
+        print(q.encode("ascii", "ignore").decode("ascii", "replace"))
